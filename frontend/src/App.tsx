@@ -8,15 +8,20 @@ const MODELS = [
 
 interface Message {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'tool'; // 'tool' = agent tool-call activity row
   content: string;
   error?: boolean;
+  // tool-specific fields
+  toolName?: string;
+  toolStatus?: 'running' | 'done';
 }
 
 interface SseEvent {
-  type: 'text' | 'done' | 'error';
+  type: 'text' | 'done' | 'error' | 'tool_call' | 'tool_result';
   text?: string;
   message?: string;
+  tool?: string;
+  input?: Record<string, unknown>;
 }
 
 const API_URL = 'http://localhost:3001';
@@ -33,7 +38,11 @@ export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Auto-scroll to bottom on new messages
+  // Refs to track the current assistant bubble and last tool row
+  // across multiple agentic loop iterations.
+  const currentAssistantIdRef = useRef<string | null>(null);
+  const lastToolIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -60,11 +69,9 @@ export default function App() {
     setInput('');
     setIsStreaming(true);
 
-    const assistantId = crypto.randomUUID();
-    setMessages((prev) => [
-      ...prev,
-      { id: assistantId, role: 'assistant', content: '' },
-    ]);
+    // Reset per-request refs
+    currentAssistantIdRef.current = null;
+    lastToolIdRef.current = null;
 
     abortRef.current = new AbortController();
 
@@ -73,16 +80,15 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: snapshot.map((m) => ({ role: m.role, content: m.content })),
+          messages: snapshot.map((m) => ({ role: m.role === 'tool' ? 'user' : m.role, content: m.content }))
+            .filter((m) => m.role === 'user' || m.role === 'assistant'), // only send real roles to API
           model,
           system: system.trim() || undefined,
         }),
         signal: abortRef.current.signal,
       });
 
-      if (!response.ok) {
-        throw new Error(`Server error: ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`Server error: ${response.status}`);
       if (!response.body) throw new Error('No response body');
 
       const reader = response.body.getReader();
@@ -104,26 +110,72 @@ export default function App() {
 
           try {
             const event = JSON.parse(raw) as SseEvent;
+
             if (event.type === 'text' && event.text) {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? { ...m, content: m.content + event.text! }
-                    : m,
-                ),
-              );
+              // ── Text delta ───────────────────────────────────────────────
+              // If no current assistant bubble exists (start of response, or
+              // after a tool call), create a new one. Otherwise append.
+              if (!currentAssistantIdRef.current) {
+                const newId = crypto.randomUUID();
+                currentAssistantIdRef.current = newId;
+                setMessages((prev) => [
+                  ...prev,
+                  { id: newId, role: 'assistant', content: event.text! },
+                ]);
+              } else {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === currentAssistantIdRef.current
+                      ? { ...m, content: m.content + event.text! }
+                      : m,
+                  ),
+                );
+              }
+            } else if (event.type === 'tool_call' && event.tool) {
+              // ── Tool call started ─────────────────────────────────────────
+              // Reset assistant bubble so the next text chunk gets a fresh bubble
+              // positioned AFTER this tool-activity row.
+              currentAssistantIdRef.current = null;
+
+              const toolId = crypto.randomUUID();
+              lastToolIdRef.current = toolId;
+
+              const url =
+                (event.input as { url?: string })?.url ?? event.tool;
+
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: toolId,
+                  role: 'tool',
+                  content: url,
+                  toolName: event.tool,
+                  toolStatus: 'running',
+                },
+              ]);
+            } else if (event.type === 'tool_result') {
+              // ── Tool call finished ────────────────────────────────────────
+              if (lastToolIdRef.current) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === lastToolIdRef.current
+                      ? { ...m, toolStatus: 'done' }
+                      : m,
+                  ),
+                );
+              }
             } else if (event.type === 'error') {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? {
-                        ...m,
-                        content: `Error: ${event.message ?? 'Unknown error'}`,
-                        error: true,
-                      }
-                    : m,
-                ),
-              );
+              // Show error in a new assistant bubble
+              const errId = crypto.randomUUID();
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: errId,
+                  role: 'assistant',
+                  content: `Error: ${event.message ?? 'Unknown error'}`,
+                  error: true,
+                },
+              ]);
             }
           } catch {
             // skip malformed SSE line
@@ -136,24 +188,24 @@ export default function App() {
       } else {
         const msg =
           err instanceof Error ? err.message : 'Failed to connect to server';
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId
-              ? { ...m, content: `Error: ${msg}`, error: true }
-              : m,
-          ),
-        );
+        setMessages((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: 'assistant', content: `Error: ${msg}`, error: true },
+        ]);
       }
     } finally {
+      // Ensure any stuck tool row shows as done
+      setMessages((prev) =>
+        prev.map((m) => (m.toolStatus === 'running' ? { ...m, toolStatus: 'done' } : m)),
+      );
       setIsStreaming(false);
+      currentAssistantIdRef.current = null;
       abortRef.current = null;
       inputRef.current?.focus();
     }
   };
 
-  const stopStreaming = () => {
-    abortRef.current?.abort();
-  };
+  const stopStreaming = () => abortRef.current?.abort();
 
   const clearChat = () => {
     if (!isStreaming) setMessages([]);
@@ -182,39 +234,27 @@ export default function App() {
             aria-label="Select model"
           >
             {MODELS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
+              <option key={m.id} value={m.id}>{m.name}</option>
             ))}
           </select>
-
           <button
             className={`icon-btn${showSettings ? ' active' : ''}`}
             onClick={() => setShowSettings((s) => !s)}
             title="System prompt"
-            aria-label="Toggle system prompt settings"
-          >
-            ⚙
-          </button>
-
+          >⚙</button>
           <button
             className="icon-btn"
             onClick={clearChat}
             disabled={isStreaming || messages.length === 0}
             title="Clear conversation"
-            aria-label="Clear conversation"
-          >
-            ✕
-          </button>
+          >✕</button>
         </div>
       </header>
 
-      {/* ── Settings panel ── */}
+      {/* ── Settings ── */}
       {showSettings && (
         <div className="settings-panel">
-          <label htmlFor="system-prompt" className="settings-label">
-            System Prompt
-          </label>
+          <label htmlFor="system-prompt" className="settings-label">System Prompt</label>
           <textarea
             id="system-prompt"
             className="settings-textarea"
@@ -232,24 +272,50 @@ export default function App() {
           <div className="empty-state">
             <div className="empty-icon">💬</div>
             <p className="empty-title">SudChat</p>
-            <p className="empty-sub">Start chatting with {currentModelName}</p>
+            <p className="empty-sub">
+              Start chatting with {currentModelName}
+              <br />
+              <span className="empty-hint">
+                Try: <em>"Summarize https://en.wikipedia.org/wiki/Artificial_intelligence"</em>
+              </span>
+            </p>
           </div>
         ) : (
-          messages.map((msg, idx) => (
-            <div key={msg.id} className={`message ${msg.role}`}>
-              <span className="message-label">
-                {msg.role === 'user' ? 'You' : 'Claude'}
-              </span>
-              <div className={`bubble${msg.error ? ' error' : ''}`}>
-                <span className="bubble-text">{msg.content}</span>
-                {msg.role === 'assistant' &&
-                  isStreaming &&
-                  idx === messages.length - 1 && (
-                    <span className="cursor" aria-hidden="true" />
+          messages.map((msg, idx) => {
+            // ── Tool activity row ──
+            if (msg.role === 'tool') {
+              return (
+                <div key={msg.id} className={`tool-row ${msg.toolStatus ?? ''}`}>
+                  {msg.toolStatus === 'running' ? (
+                    <div className="tool-spinner" />
+                  ) : (
+                    <span className="tool-check">✓</span>
                   )}
+                  <span className="tool-verb">
+                    {msg.toolStatus === 'running' ? 'Fetching' : 'Fetched'}
+                  </span>
+                  <span className="tool-url" title={msg.content}>{msg.content}</span>
+                </div>
+              );
+            }
+
+            // ── Regular message bubble ──
+            return (
+              <div key={msg.id} className={`message ${msg.role}`}>
+                <span className="message-label">
+                  {msg.role === 'user' ? 'You' : 'Claude'}
+                </span>
+                <div className={`bubble${msg.error ? ' error' : ''}`}>
+                  <span className="bubble-text">{msg.content}</span>
+                  {msg.role === 'assistant' &&
+                    isStreaming &&
+                    idx === messages.length - 1 && (
+                      <span className="cursor" aria-hidden="true" />
+                    )}
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
         <div ref={messagesEndRef} />
       </main>
@@ -268,22 +334,13 @@ export default function App() {
           aria-label="Message input"
         />
         {isStreaming ? (
-          <button
-            className="btn stop-btn"
-            onClick={stopStreaming}
-            aria-label="Stop generation"
-          >
-            ◼ Stop
-          </button>
+          <button className="btn stop-btn" onClick={stopStreaming}>◼ Stop</button>
         ) : (
           <button
             className="btn send-btn"
             onClick={() => void sendMessage()}
             disabled={!input.trim()}
-            aria-label="Send message"
-          >
-            Send ↵
-          </button>
+          >Send ↵</button>
         )}
       </footer>
     </div>

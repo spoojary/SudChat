@@ -176,6 +176,7 @@ body {
 .empty-icon  { font-size: 48px; opacity: 0.45; }
 .empty-title { font-size: 22px; font-weight: 700; color: var(--text); }
 .empty-sub   { font-size: 15px; }
+.empty-hint  { font-size: 13px; opacity: 0.7; margin-top: 6px; display: block; }
 
 /* Message rows */
 .message {
@@ -294,6 +295,61 @@ body {
   border: 1px solid var(--err-border);
 }
 .stop-btn:hover { background: #fed7d7; }
+
+/* ── Tool activity row ── */
+.tool-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 7px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  border: 1px solid #c5cdf9;
+  background: #eef0fd;
+  color: #3949ab;
+  max-width: 70%;
+  transition: all 0.3s;
+}
+
+.tool-row.done {
+  background: #edfbf3;
+  border-color: #9ae6b4;
+  color: #276749;
+}
+
+/* CSS spinner for running state */
+.tool-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.tool-check {
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.tool-verb {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.tool-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.75;
+}
 
 /* Scrollbar */
 .messages::-webkit-scrollbar       { width: 5px; }
