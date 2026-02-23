@@ -6,6 +6,13 @@ const MODELS = [
   { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' },
 ];
 
+interface CodeRunResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  language: string;
+}
+
 interface Message {
   id: string;
   role: 'user' | 'assistant' | 'tool'; // 'tool' = agent tool-call activity row
@@ -14,6 +21,9 @@ interface Message {
   // tool-specific fields
   toolName?: string;
   toolStatus?: 'running' | 'done';
+  // run_code-specific fields
+  toolCode?: string;         // the code snippet being executed
+  codeOutput?: CodeRunResult; // stdout/stderr/exitCode from execution
 }
 
 interface SseEvent {
@@ -22,6 +32,7 @@ interface SseEvent {
   message?: string;
   tool?: string;
   input?: Record<string, unknown>;
+  output?: CodeRunResult; // present in tool_result for run_code
 }
 
 const API_URL = 'http://localhost:3001';
@@ -140,26 +151,41 @@ export default function App() {
               const toolId = crypto.randomUUID();
               lastToolIdRef.current = toolId;
 
-              const url =
-                (event.input as { url?: string })?.url ?? event.tool;
+              const input = event.input ?? {};
 
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: toolId,
-                  role: 'tool',
-                  content: url,
-                  toolName: event.tool,
-                  toolStatus: 'running',
-                },
-              ]);
+              if (event.tool === 'run_code') {
+                const { code, language } = input as { code?: string; language?: string };
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: toolId,
+                    role: 'tool',
+                    content: language ?? 'code',
+                    toolName: event.tool,
+                    toolStatus: 'running',
+                    toolCode: code ?? '',
+                  },
+                ]);
+              } else {
+                const url = (input as { url?: string })?.url ?? event.tool;
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: toolId,
+                    role: 'tool',
+                    content: url,
+                    toolName: event.tool,
+                    toolStatus: 'running',
+                  },
+                ]);
+              }
             } else if (event.type === 'tool_result') {
               // ── Tool call finished ────────────────────────────────────────
               if (lastToolIdRef.current) {
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === lastToolIdRef.current
-                      ? { ...m, toolStatus: 'done' }
+                      ? { ...m, toolStatus: 'done', ...(event.output ? { codeOutput: event.output } : {}) }
                       : m,
                   ),
                 );
@@ -284,6 +310,44 @@ export default function App() {
           messages.map((msg, idx) => {
             // ── Tool activity row ──
             if (msg.role === 'tool') {
+              const isCode = msg.toolName === 'run_code';
+
+              if (isCode) {
+                const out = msg.codeOutput;
+                const exitOk = !out || out.exitCode === 0;
+                return (
+                  <div key={msg.id} className={`tool-row code-tool ${msg.toolStatus ?? ''}`}>
+                    <div className="code-tool-header">
+                      {msg.toolStatus === 'running' ? (
+                        <div className="tool-spinner" />
+                      ) : (
+                        <span className={`tool-check ${exitOk ? '' : 'fail'}`}>
+                          {exitOk ? '✓' : '✗'}
+                        </span>
+                      )}
+                      <span className="tool-verb">
+                        {msg.toolStatus === 'running' ? 'Running' : 'Ran'}
+                      </span>
+                      <span className="code-lang">{msg.content}</span>
+                      {out && (
+                        <span className={`exit-badge ${exitOk ? 'ok' : 'err'}`}>
+                          exit {out.exitCode}
+                        </span>
+                      )}
+                    </div>
+                    {msg.toolCode && (
+                      <pre className="code-preview">{msg.toolCode.slice(0, 800)}{msg.toolCode.length > 800 ? '\n…' : ''}</pre>
+                    )}
+                    {out?.stdout && (
+                      <pre className="code-stdout">{out.stdout}</pre>
+                    )}
+                    {out?.stderr && (
+                      <pre className="code-stderr">{out.stderr}</pre>
+                    )}
+                  </div>
+                );
+              }
+
               return (
                 <div key={msg.id} className={`tool-row ${msg.toolStatus ?? ''}`}>
                   {msg.toolStatus === 'running' ? (

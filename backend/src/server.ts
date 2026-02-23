@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
 import { fetchUrlTool, fetchUrl } from './tools/fetchUrl.js';
+import { runCodeTool, runCode, formatCodeResult, CodeRunResult } from './tools/runCode.js';
 
 const app = express();
 const client = new Anthropic();
@@ -27,14 +28,36 @@ const VALID_MODEL_IDS = new Set(MODELS.map((m) => m.id));
 // Claude decides WHEN to call them and WHAT arguments to pass.
 // Each tool lives in its own file under src/tools/.
 //
-const TOOLS: Anthropic.Tool[] = [fetchUrlTool];
+const TOOLS: Anthropic.Tool[] = [fetchUrlTool, runCodeTool];
 
-async function executeTool(name: string, input: unknown): Promise<string> {
+// ── Tool executor ─────────────────────────────────────────────────────────────
+//
+// Returns:
+//   content  — the string Claude sees as the tool result (drives next decision)
+//   meta     — optional structured data forwarded to the frontend via SSE
+//              (e.g., stdout/stderr so the UI can render a code output block)
+
+interface ToolResult {
+  content: string;
+  meta?: Record<string, unknown>;
+}
+
+async function executeTool(name: string, input: unknown): Promise<ToolResult> {
   if (name === 'fetch_url') {
     const { url } = input as { url: string };
-    return fetchUrl(url);
+    return { content: await fetchUrl(url) };
   }
-  return `Unknown tool: ${name}`;
+
+  if (name === 'run_code') {
+    const { code, language } = input as { code: string; language: 'python' | 'javascript' };
+    const result: CodeRunResult = await runCode(code, language);
+    return {
+      content: formatCodeResult(result), // what Claude reads
+      meta: { output: result },          // what the frontend renders
+    };
+  }
+
+  return { content: `Unknown tool: ${name}` };
 }
 
 // ── Routes ───────────────────────────────────────────────────────────────────
@@ -71,25 +94,26 @@ app.post('/api/chat', async (req: Request, res: Response) => {
   };
 
   try {
-    // Build the message history for the agentic loop.
-    // We keep appending to this array each iteration.
     const agentMessages: Anthropic.MessageParam[] = messages.map((m) => ({
       role: m.role,
       content: m.content,
     }));
 
-    // ── Agentic loop ────────────────────────────────────────────────────────
+    // ── Agentic loop ──────────────────────────────────────────────────────────
     //
     // Each iteration:
-    //   1. Call Claude with the current message history + tools
-    //   2. Stream any text deltas to the frontend
-    //   3. If Claude called a tool → execute it, append result, loop again
-    //   4. If Claude is done (end_turn) → break
+    //   1. Call Claude with full history + all tools
+    //   2. Stream text deltas to the frontend in real time
+    //   3. If stop_reason == "tool_use" → run the tool(s), append results, loop
+    //   4. If stop_reason == "end_turn"  → Claude is satisfied, break
+    //
+    // This is what enables self-correction: Claude can run code, see it fail,
+    // fix it, run it again — all within a single user message.
     //
     while (true) {
       const stream = client.messages.stream({
         model,
-        max_tokens: 4096,
+        max_tokens: 8096,
         ...(system?.trim() ? { system: system.trim() } : {}),
         tools: TOOLS,
         messages: agentMessages,
@@ -105,45 +129,37 @@ app.post('/api/chat', async (req: Request, res: Response) => {
         }
       }
 
-      // Get the full response once streaming is done
       const response = await stream.finalMessage();
 
-      if (response.stop_reason === 'end_turn') {
-        // Claude is done — exit the loop
-        break;
-      }
+      if (response.stop_reason === 'end_turn') break;
 
       if (response.stop_reason === 'tool_use') {
-        // Claude wants to call one or more tools.
-        // 1. Append the assistant's response (including tool_use blocks) to history
         agentMessages.push({ role: 'assistant', content: response.content });
 
-        // 2. Execute each tool and collect results
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
         for (const block of response.content) {
           if (block.type !== 'tool_use') continue;
 
-          // Tell the frontend a tool is running (so it can show a spinner)
+          // Notify the frontend: tool is starting
           send({ type: 'tool_call', tool: block.name, input: block.input });
 
           const result = await executeTool(block.name, block.input);
 
-          // Tell the frontend the tool finished
-          send({ type: 'tool_result', tool: block.name });
+          // Notify the frontend: tool finished (+ any structured output)
+          send({ type: 'tool_result', tool: block.name, ...(result.meta ?? {}) });
 
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
-            content: result,
+            content: result.content,
           });
         }
 
-        // 3. Feed the tool results back to Claude and loop again
+        // Feed results back so Claude can react and decide what to do next
         agentMessages.push({ role: 'user', content: toolResults });
       } else {
-        // Unexpected stop reason — bail out
-        break;
+        break; // unexpected stop reason
       }
     }
 

@@ -351,6 +351,86 @@ body {
   opacity: 0.75;
 }
 
+/* ── Code tool row ── */
+.tool-row.code-tool {
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  max-width: 86%;
+  gap: 0;
+}
+
+.code-tool-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+}
+
+.code-lang {
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
+.exit-badge {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+.exit-badge.ok  { background: #c6f6d5; color: #276749; }
+.exit-badge.err { background: #fed7d7; color: #c53030; }
+
+.tool-check.fail { color: var(--err-text); }
+
+.code-preview {
+  margin: 0;
+  padding: 10px 14px;
+  background: #1e2030;
+  color: #cdd6f4;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-x: auto;
+  white-space: pre;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.code-stdout {
+  margin: 0;
+  padding: 8px 14px;
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.code-stderr {
+  margin: 0;
+  padding: 8px 14px;
+  background: #2d0a0a;
+  color: #fca5a5;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-top: 1px solid rgba(255,100,100,0.15);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
 /* Scrollbar */
 .messages::-webkit-scrollbar       { width: 5px; }
 .messages::-webkit-scrollbar-track { background: transparent; }
